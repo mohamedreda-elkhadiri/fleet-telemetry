@@ -174,6 +174,7 @@ var _ = Describe("MQTTProducer", func() {
 
 	Describe("Produce", func() {
 		It("should publish MQTT messages for each field in the payload", func() {
+			createdAt := time.Date(2026, 10, 31, 7, 8, 5, 123456789, time.UTC)
 			producer, err := mqtt.NewProducer(
 				context.Background(),
 				mockConfig,
@@ -219,7 +220,8 @@ var _ = Describe("MQTTProducer", func() {
 						},
 					},
 				},
-				CreatedAt: timestamppb.Now(),
+				CreatedAt: timestamppb.New(createdAt),
+				IsResend:  true,
 			}
 
 			payloadBytes, err := proto.Marshal(payload)
@@ -241,7 +243,7 @@ var _ = Describe("MQTTProducer", func() {
 
 			producer.Produce(record)
 
-			Expect(publishedTopics).To(HaveLen(4))
+			Expect(publishedTopics).To(HaveLen(8))
 
 			vehicleNameTopic := "test/topic/TEST123/v/VehicleName"
 			invalidTopic := "test/topic/TEST123/v/TimeToFullCharge"
@@ -261,6 +263,58 @@ var _ = Describe("MQTTProducer", func() {
 			Expect(publishedTopics[invalidTopic]).To(Equal([]byte(invalidValue)))
 			Expect(publishedTopics[locationTopic]).To(Equal([]byte(locationValue)))
 			Expect(publishedTopics[batteryLevelTopic]).To(Equal([]byte(batterLevelValue)))
+
+			// The "vt" topics carry the same values with the payload's created_at and is_resend.
+			timestamped := func(value string) []byte {
+				return []byte(`{"value":` + value + `,"created_at":"2026-10-31T07:08:05.123456789Z","is_resend":true}`)
+			}
+			Expect(publishedTopics["test/topic/TEST123/vt/VehicleName"]).To(Equal(timestamped(vehicleNameValue)))
+			Expect(publishedTopics["test/topic/TEST123/vt/TimeToFullCharge"]).To(Equal(timestamped(invalidValue)))
+			Expect(publishedTopics["test/topic/TEST123/vt/Location"]).To(Equal(timestamped(locationValue)))
+			Expect(publishedTopics["test/topic/TEST123/vt/BatteryLevel"]).To(Equal(timestamped(batterLevelValue)))
+		})
+
+		It("should omit created_at on the vt topics when the payload has none", func() {
+			producer, err := mqtt.NewProducer(
+				context.Background(),
+				mockConfig,
+				mockCollector,
+				"test_namespace",
+				mockAirbrake,
+				nil,
+				nil,
+				mockLogger,
+			)
+			Expect(err).NotTo(HaveOccurred())
+
+			payload := &protos.Payload{
+				Vin: "TEST123",
+				Data: []*protos.Datum{
+					{
+						Key: protos.Field_BatteryLevel,
+						Value: &protos.Value{
+							Value: &protos.Value_FloatValue{FloatValue: 75.5},
+						},
+					},
+				},
+			}
+			payloadBytes, err := proto.Marshal(payload)
+			Expect(err).NotTo(HaveOccurred())
+
+			message := messages.StreamMessage{
+				TXID:         []byte("1234"),
+				SenderID:     []byte("vehicle_device.TEST123"),
+				MessageTopic: []byte("V"),
+				Payload:      payloadBytes,
+			}
+			msgBytes, err := message.ToBytes()
+			Expect(err).NotTo(HaveOccurred())
+			record, err := telemetry.NewRecord(serializer, msgBytes, "1", true)
+			Expect(err).NotTo(HaveOccurred())
+
+			producer.Produce(record)
+
+			Expect(publishedTopics["test/topic/TEST123/vt/BatteryLevel"]).To(Equal([]byte(`{"value":75.5,"is_resend":false}`)))
 		})
 
 		It("should publish MQTT messages for vehicle alerts", func() {

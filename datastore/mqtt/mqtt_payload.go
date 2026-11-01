@@ -11,9 +11,25 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
+// timestampedValue is the envelope published on the "vt" topics. The plain "v" topics carry only the
+// bare value, which drops the payload's created_at and is_resend; this keeps them.
+type timestampedValue struct {
+	Value     interface{} `json:"value"`
+	CreatedAt string      `json:"created_at,omitempty"`
+	IsResend  bool        `json:"is_resend"`
+}
+
 func (p *Producer) processVehicleFields(rec *telemetry.Record, payload *protos.Payload) ([]pahomqtt.Token, error) {
 	var tokens []pahomqtt.Token
 	convertedPayload := p.payloadToMap(payload)
+
+	// Sub-second precision matters: signals that change within the same second must not collide.
+	// A payload without created_at omits the field rather than reporting the Unix epoch.
+	var createdAt string
+	if payload.GetCreatedAt() != nil {
+		createdAt = payload.GetCreatedAt().AsTime().UTC().Format(time.RFC3339Nano)
+	}
+
 	for key, value := range convertedPayload {
 		mqttTopicName := fmt.Sprintf("%s/%s/v/%s", p.config.TopicBase, rec.Vin, key)
 		jsonValue, err := json.Marshal(value)
@@ -23,6 +39,19 @@ func (p *Producer) processVehicleFields(rec *telemetry.Record, payload *protos.P
 		token := p.client.Publish(mqttTopicName, p.config.QoS, p.config.Retained, jsonValue)
 		tokens = append(tokens, token)
 		p.updateMetrics(rec.TxType, len(jsonValue))
+
+		timestampedTopicName := fmt.Sprintf("%s/%s/vt/%s", p.config.TopicBase, rec.Vin, key)
+		jsonTimestamped, err := json.Marshal(timestampedValue{
+			Value:     value,
+			CreatedAt: createdAt,
+			IsResend:  payload.GetIsResend(),
+		})
+		if err != nil {
+			return tokens, fmt.Errorf("failed to marshal JSON for MQTT topic %s: %v", timestampedTopicName, err)
+		}
+		token = p.client.Publish(timestampedTopicName, p.config.QoS, p.config.Retained, jsonTimestamped)
+		tokens = append(tokens, token)
+		p.updateMetrics(rec.TxType, len(jsonTimestamped))
 	}
 	return tokens, nil
 }
