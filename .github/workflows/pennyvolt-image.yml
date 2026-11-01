@@ -1,0 +1,55 @@
+name: PennyVolt image
+
+# Builds the patched server and pushes it to GHCR. Runs when a tag like v0.9.5-pv.1 is pushed:
+# the part before "-pv." is the upstream release the patch sits on, the number after it is our
+# patch revision.
+on:
+  push:
+    tags: ['v*-pv.*']
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 1.27.x
+
+      - name: Test the MQTT dispatcher
+        run: go test ./datastore/mqtt/...
+
+  image:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+
+      # Pin this digest in deploy/telemetry/docker-compose.yml.
+      - name: Print the digest
+        run: |
+          echo "ghcr.io/${{ github.repository }}:${{ github.ref_name }}@${{ steps.push.outputs.digest }}" | tee -a "$GITHUB_STEP_SUMMARY"
